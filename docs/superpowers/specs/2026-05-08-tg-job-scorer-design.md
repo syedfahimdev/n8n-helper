@@ -295,7 +295,17 @@ The implementation plan (next step) should explicitly resolve:
 3. **Slug collisions** — unix-ts suffix should make collisions impossible in practice; confirm by test.
 4. **Vercel cold-start cost** — measure how long the first request after idle takes; if >5s, consider switching `tailor_resume_for_jd` to a non-Vercel runtime.
 
-## 11. Acceptance criteria
+## 11. Implementation target
+
+The deterministic workflow replaces the existing "Apply Resume" workflow at the user's self-hosted n8n:
+
+- **n8n base:** `https://n8n.srv1445761.hstgr.cloud`
+- **Workflow id:** `IApjHgCVF7zQ3Oob` (currently inactive, wired as the rejected Approach 1 — AI Agent + Anthropic + MCP Client + Simple Memory)
+- **Strategy:** in-place replacement via `n8n_update_full_workflow` once the implementation plan is executed. We keep the workflow id and rename only if needed; archive is not necessary.
+
+n8n-mcp connectivity has been verified for this instance, so the implementation can use `n8n_create_workflow`, `n8n_update_full_workflow`, and `n8n_validate_workflow` directly — no copy/paste from a UI.
+
+## 12. Acceptance criteria
 
 This v1 ships when:
 
