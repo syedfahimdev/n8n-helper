@@ -244,15 +244,46 @@ Skills under `skills/` are discovered on every call, so adding a new skill folde
 
 ## 9. Deployment
 
-The server binds to `HOST` and `PORT` from `.env` (defaults to `0.0.0.0:8000`). For "n8n connects from anywhere," you have three reasonable options:
+The same `build_app()` factory in `server.py` is reused for every deployment target — local development, Vercel, VPS, Docker — so the wiring is identical and only the runtime envelope changes.
+
+### 9.1 Vercel (recommended for this project)
+
+The repo ships with `api/mcp.py` (ASGI entrypoint) and `vercel.json` (Fluid Compute on, 300s max duration). Vercel has [native MCP server support](https://vercel.com/docs/mcp/deploy-mcp-servers-to-vercel) — Fluid Compute keeps instances warm so MCP session state survives bursty traffic.
+
+Deploy:
+
+```bash
+# from inside the project root
+vercel link              # connect this folder to a Vercel project (or create one)
+vercel env add N8N_HELPER_TOKEN production
+# paste the token you generated for .env, hit enter
+vercel --prod            # first production deploy
+```
+
+After the first deploy, the endpoint is:
+
+```
+POST https://<project-name>.vercel.app/api/mcp
+Header: Authorization: Bearer <N8N_HELPER_TOKEN>
+```
+
+Connect the GitHub repo via the Vercel dashboard once and every `git push` to `main` will auto-deploy.
+
+**Caveats specific to Vercel + MCP:**
+
+- Sessions live in-process. Fluid Compute keeps a warm instance alive across calls so this usually doesn't matter, but on cold start the MCP client must re-handshake. n8n's MCP Client Tool node does this transparently.
+- For high-fanout multi-instance workloads you'll want session state in Vercel KV (Redis). Out of scope for v1.
+- `.env` is in `.gitignore` and `.vercelignore`; never put secrets in `vercel.json`. Use `vercel env add` (or the dashboard).
+
+### 9.2 Other targets
 
 | Option | Setup | When to use |
 |---|---|---|
-| **Cloudflare Tunnel** | `cloudflared tunnel --url http://localhost:8000` | Fastest path. Free. Stable subdomain optional. Good for a personal/hobby server. |
-| **Reverse proxy on a VPS** | nginx → uvicorn → server.py, `Caddy` is even easier with auto-TLS | Best when you already pay for the box. ~$5-20/mo. |
-| **Fly.io / Railway / Render** | `Dockerfile` → push → done | Lowest ops if you don't already have a VPS. Free tiers are tight; budget for $5/mo. |
+| **Cloudflare Tunnel** | `cloudflared tunnel --url http://localhost:8000` | Fastest path for local-only deploys. Free. |
+| **Reverse proxy on a VPS** | nginx → uvicorn → `server:build_app().http_app()`, Caddy gives auto-TLS | Best when you already pay for the box. |
+| **Fly.io / Railway / Render** | `Dockerfile` → push → done | Lowest ops if you don't already have a VPS. |
 
-For all three, set `N8N_HELPER_TOKEN` in the host's secret store, **not** in a committed file. Confirm `https://` (TLS) and that the bearer header is being forwarded by your proxy.
+For all of these, set `N8N_HELPER_TOKEN` in the host's secret store, never in a committed file. Confirm TLS, and that the bearer header is being forwarded by your proxy.
 
 ## 10. Roadmap
 
