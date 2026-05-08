@@ -62,12 +62,24 @@ def register_tools(mcp: FastMCP) -> None:
 
     Each module under `tools/` exposes a `register(mcp)` function. Keeping
     registration explicit (rather than auto-importing) makes the tool surface
-    obvious from this file alone.
-    """
-    from tools import health, skills_runner
+    obvious from this file alone — every capability is one grep away.
 
+    Convention for new tools:
+      • Inputs are flat scalars (str, int, float, bool). Avoid nested dicts
+        as arguments — they make n8n's UI render badly and don't add value.
+      • Each tool has a clear docstring; `find_tool` searches both name and
+        description, so plain-language descriptions matter.
+      • Tools that depend on external services (anthropic, openai, paid
+        APIs) should import their SDK lazily so the server boots without
+        the dep installed.
+    """
+    from tools import discovery, health, skills_runner, text, web
+
+    discovery.register(mcp)
     health.register(mcp)
     skills_runner.register(mcp)
+    text.register(mcp)
+    web.register(mcp)
 
 
 def build_app() -> FastMCP:

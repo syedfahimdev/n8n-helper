@@ -236,11 +236,56 @@ Out of the box, after `pip install -r requirements.txt && python server.py`, the
 
 | Tool | Description |
 |---|---|
-| `health` | Returns server status, uptime, Python version, and a UTC timestamp. Smoke-test for connectivity. |
-| `list_skills` | Lists every skill folder under `skills/` with its frontmatter summary (name, description, category, inputs, runs). |
+| `find_tool(query, limit)` | Search the registry by free-text query. Returns top matches with name, description, and inputSchema — enough for an agent to call the matched tool directly. |
+| `health()` | Returns server status, uptime, Python version, and a UTC timestamp. Smoke-test for connectivity. |
+| `fetch_url(url, max_chars)` | Fetch a URL via Jina Reader and return its content as clean markdown. Handles JS-rendered SPAs (Ashby, Greenhouse, Workday) that fail with a plain HTTP fetch. |
+| `extract_keywords(text, top_n, min_length)` | Top-N most frequent meaningful terms in a text (drops stopwords). |
+| `score_text_overlap(text_a, text_b, min_length)` | Jobscan-style coverage percentage: how much of `text_a`'s vocabulary appears in `text_b`. Useful for resume-vs-JD checks. |
+| `list_skills()` | Lists every skill folder under `skills/` with its frontmatter summary. |
 | `run_skill(name, inputs)` | Executes a named skill and returns its output. Dispatches to python/script/prompt handler based on the skill's category. |
 
 Skills under `skills/` are discovered on every call, so adding a new skill folder requires no restart.
+
+### 8.1 The `find_tool` workflow
+
+When the server hosts dozens (eventually hundreds) of tools, listing them all in an agent's context wastes tokens and listing them in a dropdown frustrates humans. `find_tool` solves this by being *the* entry point for tool discovery:
+
+```jsonc
+// Agent calls find_tool first
+{
+  "name": "find_tool",
+  "arguments": { "query": "score a job posting", "limit": 3 }
+}
+
+// Server returns ranked matches with the schema needed to call them
+{
+  "total": 12,
+  "matches": [
+    {
+      "name": "score_text_overlap",
+      "description": "Jobscan-style coverage percentage...",
+      "inputSchema": {
+        "properties": {
+          "text_a": { "type": "string", "description": "..." },
+          "text_b": { "type": "string", "description": "..." }
+        },
+        "required": ["text_a", "text_b"]
+      }
+    }
+  ]
+}
+```
+
+The agent then issues a normal MCP `tools/call` against the matched tool. In n8n's classic (non-agent) workflow mode, you don't need `find_tool` — n8n already shows every registered tool in its dropdown — but the same convention pays off when the catalog grows.
+
+### 8.2 Tool argument convention
+
+Tools must use **flat scalar arguments** — strings, ints, floats, bools — never nested objects. Two reasons:
+
+1. n8n's MCP Client Tool node renders each argument as one form field. Flat scalars become a clean form; nested dicts render as raw JSON the user has to write by hand.
+2. URL/form-encoded transports (and many tool-calling LLMs) expect flat key=value parameters.
+
+If your tool needs structured input, accept a JSON-encoded string parameter and parse it inside the tool — don't expose nested types in the schema.
 
 ## 9. Deployment
 
