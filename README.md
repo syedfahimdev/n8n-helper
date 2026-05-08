@@ -1,0 +1,274 @@
+# n8n-helper
+
+A small, self-hosted **MCP server** that exposes Python tools and markdown-defined "skills" to [n8n](https://n8n.io/) (and any other MCP client) over **HTTP streamable transport** with **bearer-token authentication**.
+
+> **What problem does this solve?** n8n's HTTP node can fetch URLs and call REST APIs, but it can't run a headless browser, score a resume against a JD, scrape multiple job boards, or compose Python-only libraries. This server is a sidecar that gives n8n (and any LLM agent) a place to put that logic — once, in one Python project — and then call it from any workflow.
+
+---
+
+## Table of contents
+
+1. [What this server is](#1-what-this-server-is)
+2. [Architecture](#2-architecture)
+3. [Quick start](#3-quick-start)
+4. [Authentication](#4-authentication)
+5. [Connecting from n8n](#5-connecting-from-n8n)
+6. [Adding a tool (in-process Python)](#6-adding-a-tool-in-process-python)
+7. [Adding a skill (markdown + script / prompt)](#7-adding-a-skill-markdown--script--prompt)
+8. [Built-in tools](#8-built-in-tools)
+9. [Deployment](#9-deployment)
+10. [Roadmap](#10-roadmap)
+
+---
+
+## 1. What this server is
+
+`n8n-helper` is a [FastMCP](https://github.com/prefecthq/fastmcp) server that:
+
+- Speaks the **Model Context Protocol (MCP)** over HTTP streamable transport (the modern replacement for SSE), so any MCP-aware client can connect.
+- Authenticates clients with a **bearer token** in the `Authorization` header — set in `.env`, never committed.
+- Exposes **two layers of capability**:
+  - **Tools** — Python functions decorated with `@mcp.tool` in `tools/*.py`. Best for fast, in-process logic.
+  - **Skills** — markdown-defined units in `skills/<name>/SKILL.md`. Best for capabilities that have prompt logic, ship as a script, or you want to author/edit without restarting the server.
+
+The same server is intended to be used by:
+- **n8n workflows** — via the *MCP Client Tool* node, calling `http://<host>:8000/mcp/`.
+- **AI agents / Claude Code / Cursor** — same endpoint, same bearer token.
+- **Direct HTTP callers** — `curl`, scripts, etc., for debugging or one-off automation.
+
+## 2. Architecture
+
+```
+                ┌──────────────────────────────────────────────────┐
+                │                  n8n-helper                      │
+                │                                                  │
+   n8n ─────────┤  FastMCP server                                  │
+   Claude ──────┤    transport=http  (streamable)                  │
+   curl  ───────┤    auth=Bearer <N8N_HELPER_TOKEN>                │
+                │                                                  │
+                │    register_tools()                              │
+                │      └── tools/health.py        @mcp.tool        │
+                │      └── tools/skills_runner.py @mcp.tool        │
+                │           └── list_skills, run_skill             │
+                │                                                  │
+                │    skills/<name>/SKILL.md                        │
+                │      ├── category: python  (in-process import)   │
+                │      ├── category: script  (subprocess)          │
+                │      └── category: prompt  (LLM call)            │
+                │                                                  │
+                └──────────────────────────────────────────────────┘
+```
+
+Two layers exist for a reason:
+- **Tools** are for capabilities you want available *the instant the server starts*. They live in version control alongside the server, get type-checked imports, and run in-process.
+- **Skills** are for capabilities you want to author, iterate, or hot-swap. A skill is a folder. Drop a folder in, the next `list_skills` call sees it. Edit the skill's frontmatter or script; the next `run_skill` reloads it.
+
+## 3. Quick start
+
+```bash
+git clone https://github.com/syedfahimdev/n8n-helper.git
+cd n8n-helper
+
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# Generate a strong token and paste it as N8N_HELPER_TOKEN
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+python server.py
+# → server listening on 0.0.0.0:8000, MCP endpoint at /mcp/
+```
+
+Verify health:
+
+```bash
+TOKEN="$(grep N8N_HELPER_TOKEN .env | head -1 | cut -d= -f2)"
+curl -sS -X POST http://localhost:8000/mcp/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+You should see a JSON response listing `health`, `list_skills`, and `run_skill`.
+
+## 4. Authentication
+
+Auth is a **bearer token in the `Authorization` header**. The server uses FastMCP's `StaticTokenVerifier`, which compares the incoming token against an in-process map loaded from environment variables.
+
+| Variable | Purpose |
+|---|---|
+| `N8N_HELPER_TOKEN` | Primary token. Required. Has full `tools:read,tools:write` scopes. |
+| `N8N_HELPER_TOKEN_RO` | Optional second token with only `tools:read`. Use for clients you don't fully trust. |
+
+Token rotation: change the value in `.env`, restart the server, update the consumer. There is no token revocation list — by design, the source of truth is the environment.
+
+For OAuth2 (full Authorization Server flows for human users), see the [Roadmap](#10-roadmap). v1 ships bearer-only because n8n + Claude Desktop + Cursor all support bearer headers natively and OAuth2 adds significant operational complexity that personal usage doesn't need yet.
+
+## 5. Connecting from n8n
+
+In your n8n workflow:
+
+1. Add an **AI Agent** node (or any node that supports MCP tools).
+2. Add an **MCP Client Tool** sub-node.
+3. Configure:
+   - **Endpoint**: `https://your-domain.example/mcp/` (or the local URL while testing)
+   - **Transport**: HTTP Streamable
+   - **Authentication**: Header → `Authorization: Bearer <N8N_HELPER_TOKEN>`
+4. Save. The n8n agent will auto-discover every tool registered on the server (`health`, `list_skills`, `run_skill`, plus anything you add).
+
+When the agent decides to use a tool, it sends a JSON-RPC `tools/call` request; the server runs the function and streams the result back. n8n surfaces the result as the node output.
+
+## 6. Adding a tool (in-process Python)
+
+For most capabilities, this is the right path. Tools are pure Python functions that run inside the server process — no subprocess overhead, full access to the project's deps.
+
+```python
+# tools/example.py
+from fastmcp import FastMCP
+
+def register(mcp: FastMCP) -> None:
+    @mcp.tool
+    def greet(name: str) -> str:
+        """Say hello. Used as a smoke test for new clients."""
+        return f"hi, {name}"
+```
+
+Then in `server.py`'s `register_tools()`:
+
+```python
+from tools import health, skills_runner, example
+example.register(mcp)
+```
+
+Restart the server. The tool is live.
+
+> **Why explicit registration instead of auto-discovery?** It keeps the tool surface visible in one place (`server.py`). When you read this server cold, every capability is one grep away. Auto-discovery hides that information.
+
+## 7. Adding a skill (markdown + script / prompt)
+
+Skills are for capabilities you want to **author, edit, or hot-swap** without touching the server code. Each skill is a folder containing a `SKILL.md`.
+
+### 7.1 Skill file structure
+
+```
+skills/
+└── job-scorer/
+    ├── SKILL.md          # frontmatter + instructions
+    ├── scripts/
+    │   └── score.py      # for category=script
+    └── data/
+        └── ...           # optional supporting files
+```
+
+### 7.2 SKILL.md frontmatter
+
+```yaml
+---
+name: job-scorer                       # MCP-callable name
+description: Score a job URL against the master resume
+category: script                       # python | script | prompt
+inputs:
+  url: { type: string, required: true }
+  resume_path: { type: string, default: /root/n8n-helper/data/resume.md }
+runs:
+  script: scripts/score.py             # path within this skill folder
+  entry: score_url                     # informational; subprocess uses --json arg
+---
+
+# Job Scorer
+
+Description of what the skill does, when to use it, and what its outputs mean.
+This body is shown to AI agents via `list_skills`. For `category: prompt`
+skills, this body is also passed as the LLM system prompt.
+```
+
+### 7.3 The three categories
+
+| Category | What it does | When to use |
+|---|---|---|
+| `python` | Imports a module from the skill folder and calls `entry(**inputs)` in-process. Fastest, no subprocess. | Pure-Python logic that wants the server's deps. |
+| `script` | Runs `python <script> --json '<inputs>'` as a subprocess. Captures stdout (must be a single JSON object). | Heavier scripts, isolation, or when you want to write the script in any language with a Python wrapper. |
+| `prompt` | Sends the markdown body + inputs to an LLM (Anthropic Haiku by default). Returns the model's text. | Skills whose value *is* the prompt — research, classification, drafting. |
+
+### 7.4 Script-skill convention
+
+A script skill MUST:
+
+- Accept a `--json '<payload>'` CLI argument.
+- Print **exactly one JSON document** to stdout on success.
+- Exit non-zero on failure (the runner surfaces stderr to the caller).
+
+A minimal example:
+
+```python
+# skills/job-scorer/scripts/score.py
+import argparse, json, sys
+
+def score_url(url: str, resume_path: str = "/root/n8n-helper/data/resume.md") -> dict:
+    # ... real scoring logic here ...
+    return {"score": 87.5, "missing": ["wearable"]}
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--json", required=True)
+    args = ap.parse_args()
+    inputs = json.loads(args.json)
+    print(json.dumps(score_url(**inputs)))
+```
+
+Calling from n8n / any MCP client:
+
+```json
+{
+  "name": "run_skill",
+  "arguments": {
+    "name": "job-scorer",
+    "inputs": { "url": "https://jobs.example.com/123" }
+  }
+}
+```
+
+## 8. Built-in tools
+
+Out of the box, after `pip install -r requirements.txt && python server.py`, the server exposes:
+
+| Tool | Description |
+|---|---|
+| `health` | Returns server status, uptime, Python version, and a UTC timestamp. Smoke-test for connectivity. |
+| `list_skills` | Lists every skill folder under `skills/` with its frontmatter summary (name, description, category, inputs, runs). |
+| `run_skill(name, inputs)` | Executes a named skill and returns its output. Dispatches to python/script/prompt handler based on the skill's category. |
+
+Skills under `skills/` are discovered on every call, so adding a new skill folder requires no restart.
+
+## 9. Deployment
+
+The server binds to `HOST` and `PORT` from `.env` (defaults to `0.0.0.0:8000`). For "n8n connects from anywhere," you have three reasonable options:
+
+| Option | Setup | When to use |
+|---|---|---|
+| **Cloudflare Tunnel** | `cloudflared tunnel --url http://localhost:8000` | Fastest path. Free. Stable subdomain optional. Good for a personal/hobby server. |
+| **Reverse proxy on a VPS** | nginx → uvicorn → server.py, `Caddy` is even easier with auto-TLS | Best when you already pay for the box. ~$5-20/mo. |
+| **Fly.io / Railway / Render** | `Dockerfile` → push → done | Lowest ops if you don't already have a VPS. Free tiers are tight; budget for $5/mo. |
+
+For all three, set `N8N_HELPER_TOKEN` in the host's secret store, **not** in a committed file. Confirm `https://` (TLS) and that the bearer header is being forwarded by your proxy.
+
+## 10. Roadmap
+
+The current scope is intentionally small (HTTP + bearer + tools + skills runner). Planned next steps, in priority order:
+
+1. **OAuth2 authorization server** — for human users, multi-tenant, or selling skill access. Replaces (or layers over) the bearer model.
+2. **Webhooks IN** — `/webhooks/<integration>/<event>` endpoints that trigger skill chains (Stripe, GitHub, Telegram).
+3. **Cron** — APScheduler runs skills on a cron expression declared in their frontmatter.
+4. **Events OUT** — pub/sub bus that fires `skill.<name>.completed` events for downstream subscribers.
+5. **Lifecycle middleware** — per-call audit log, rate limit, billing meter.
+6. **Skill registry index** — DB-backed listing for fast `list_skills` over hundreds of skills.
+
+Items 1–3 are the most likely to ship in v2. Items 4–6 unlock multi-tenant / paid usage and are deliberately deferred.
+
+---
+
+## License
+
+MIT.
