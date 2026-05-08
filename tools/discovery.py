@@ -51,29 +51,74 @@ def _score(query_tokens: list[str], name: str, description: str) -> int:
 def register(mcp: FastMCP) -> None:
     @mcp.tool
     async def find_tool(query: str, limit: int = 5) -> dict:
-        """Search the server's tool registry by free-text query.
+        """Search this server's tool registry to find the right tool for a task.
 
-        Use this as the first call when you don't know which tool to use.
-        Returns the top matches ranked by relevance, each with its name,
-        description, and inputSchema. The schema is the JSON Schema for
-        the tool's arguments — exactly what you'd pass to `tools/call`.
+        Call this FIRST whenever you (an AI agent) need to do something but
+        don't already know which specific tool to invoke. It is cheaper than
+        listing the entire catalog (one round-trip, ~few hundred tokens)
+        and returns enough information that your next call can be the
+        actual `tools/call` against the matched tool — no second discovery
+        round-trip needed.
+
+        ## How to write a good `query`
+
+        Use a short natural-language phrase describing the *action* you
+        want to perform, in 2–8 words. Include the verb and the noun.
+        Avoid filler words ("please", "I want to", "can you").
+
+        Good queries (return clean matches):
+          • "fetch a webpage as markdown"
+          • "score a resume against a job description"
+          • "search jobs on indeed and linkedin"
+          • "extract email addresses from text"
+          • "convert markdown to pdf"
+
+        Bad queries (too vague — return many low-confidence matches):
+          • "help"
+          • "the thing for jobs"
+          • "do stuff with text"
+
+        If your first query returns no matches with a good `_score` (>= 5),
+        rephrase with more specific verbs/nouns and try again.
+
+        ## What you get back
+
+        A dict with:
+          • `total` — total number of tools on the server (lets you know
+            how big the catalog is).
+          • `matches` — up to `limit` items, each with:
+              - `name` — exact tool name to use in `tools/call`
+              - `description` — first line of the tool's docstring
+              - `inputSchema` — JSON Schema for the tool's arguments,
+                with `properties`, `required`, and per-field
+                `description`. Use this verbatim to construct the
+                arguments object for `tools/call`.
+              - `_score` — relevance score (higher is better; >=10 means
+                the query phrase appeared in the tool's name).
+
+        ## What to do next
+
+        Read `inputSchema.properties` to learn each argument's name and
+        type, fill in values, then issue:
+
+            tools/call { "name": <matched.name>, "arguments": { ... } }
+
+        ## Important
+
+        `find_tool` does not call the matched tool for you. It is search
+        only. The agent is responsible for the follow-up `tools/call`.
 
         Args:
-            query: Free-text query describing what you want to do, e.g.
-                "fetch a webpage", "score a job posting", "search jobs".
-            limit: Maximum number of matches to return. Defaults to 5.
+            query: 2–8 word natural-language phrase describing the action
+                you want to perform. Match against tool names and
+                descriptions; names weighted higher.
+            limit: Max number of matches to return. Defaults to 5. Lower
+                this when you're confident; raise it when exploring.
 
         Returns:
-            A dict with two keys:
-              - matches: list of {name, description, inputSchema} for the
-                top-ranked tools (excluding `find_tool` itself).
-              - total: total number of tools registered on the server.
-
-        Tips:
-            - The query is matched against tool names AND descriptions —
-              describing tools in plain language pays off here.
-            - Names contribute more weight than descriptions; if your
-              search is too noisy, name your tools more specifically.
+            A dict shaped `{ total: int, matches: [{ name, description,
+            inputSchema, _score }, ...] }`. `matches` is empty if nothing
+            scored above zero — try a different query.
         """
         all_tools = await mcp._list_tools()
         q_tokens = [t.lower() for t in _TOKEN.findall(query)]

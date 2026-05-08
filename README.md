@@ -236,15 +236,12 @@ Out of the box, after `pip install -r requirements.txt && python server.py`, the
 
 | Tool | Description |
 |---|---|
-| `find_tool(query, limit)` | Search the registry by free-text query. Returns top matches with name, description, and inputSchema — enough for an agent to call the matched tool directly. |
+| `find_tool(query, limit)` | **The discovery tool.** Search the registry by free-text query. Returns top matches with name, description, and inputSchema — enough for an agent to call the matched tool directly. Use this first whenever you don't already know the right tool. |
 | `health()` | Returns server status, uptime, Python version, and a UTC timestamp. Smoke-test for connectivity. |
-| `fetch_url(url, max_chars)` | Fetch a URL via Jina Reader and return its content as clean markdown. Handles JS-rendered SPAs (Ashby, Greenhouse, Workday) that fail with a plain HTTP fetch. |
-| `extract_keywords(text, top_n, min_length)` | Top-N most frequent meaningful terms in a text (drops stopwords). |
-| `score_text_overlap(text_a, text_b, min_length)` | Jobscan-style coverage percentage: how much of `text_a`'s vocabulary appears in `text_b`. Useful for resume-vs-JD checks. |
 | `list_skills()` | Lists every skill folder under `skills/` with its frontmatter summary. |
 | `run_skill(name, inputs)` | Executes a named skill and returns its output. Dispatches to python/script/prompt handler based on the skill's category. |
 
-Skills under `skills/` are discovered on every call, so adding a new skill folder requires no restart.
+The server intentionally ships with a small, sharp default set. Capability tools (URL fetching, text scoring, job search, etc.) are added one at a time, each with its own design pass — see [§8.3 Designing a new tool](#83-designing-a-new-tool).
 
 ### 8.1 The `find_tool` workflow
 
@@ -254,7 +251,7 @@ When the server hosts dozens (eventually hundreds) of tools, listing them all in
 // Agent calls find_tool first
 {
   "name": "find_tool",
-  "arguments": { "query": "score a job posting", "limit": 3 }
+  "arguments": { "query": "fetch a webpage as markdown", "limit": 3 }
 }
 
 // Server returns ranked matches with the schema needed to call them
@@ -262,21 +259,23 @@ When the server hosts dozens (eventually hundreds) of tools, listing them all in
   "total": 12,
   "matches": [
     {
-      "name": "score_text_overlap",
-      "description": "Jobscan-style coverage percentage...",
+      "name": "fetch_url",
+      "description": "Fetch a URL and return its content as clean markdown.",
       "inputSchema": {
+        "type": "object",
         "properties": {
-          "text_a": { "type": "string", "description": "..." },
-          "text_b": { "type": "string", "description": "..." }
+          "url": { "type": "string", "description": "Absolute URL to fetch" },
+          "max_chars": { "type": "integer", "default": 20000 }
         },
-        "required": ["text_a", "text_b"]
-      }
+        "required": ["url"]
+      },
+      "_score": 11
     }
   ]
 }
 ```
 
-The agent then issues a normal MCP `tools/call` against the matched tool. In n8n's classic (non-agent) workflow mode, you don't need `find_tool` — n8n already shows every registered tool in its dropdown — but the same convention pays off when the catalog grows.
+The agent then issues a normal MCP `tools/call` against the matched tool. In n8n's classic (non-agent) workflow mode, you don't need `find_tool` — n8n already shows every registered tool in its dropdown — but the same naming/description discipline pays off when the catalog grows.
 
 ### 8.2 Tool argument convention
 
@@ -286,6 +285,49 @@ Tools must use **flat scalar arguments** — strings, ints, floats, bools — ne
 2. URL/form-encoded transports (and many tool-calling LLMs) expect flat key=value parameters.
 
 If your tool needs structured input, accept a JSON-encoded string parameter and parse it inside the tool — don't expose nested types in the schema.
+
+### 8.3 Designing a new tool
+
+Every tool is **discoverable by keywords or use-case**. That only works if the name and description carry enough signal. Before writing any code, fill in this short design sketch:
+
+```
+Tool name:        <verb>_<domain>          # e.g. fetch_url, score_resume_match
+One-line desc:    <what it does in plain language, 1 sentence>
+Inputs:           <flat scalar args; declare each with a clear description>
+Output:           <shape of return value; flat dict preferred>
+Upstream APIs:    <free / freemium / paid services this tool composes, if any>
+```
+
+If you can't fill the one-line description in a single sentence, the tool is doing too much — split it. If the inputs need nested objects, flatten them or accept a JSON-encoded string parameter.
+
+### 8.4 Composing multiple external APIs in one tool
+
+A single MCP tool can stitch together multiple upstream services to deliver one clean capability. The client doesn't see vendor diversity; the tool absorbs it.
+
+Example:
+
+```python
+@mcp.tool
+async def score_job_url(url: str, resume_path: str = "/data/resume.md") -> dict:
+    """Fetch a job posting URL and score the user's resume against it.
+
+    Internally composes:
+      - Jina Reader (free, https://r.jina.ai)        → URL → clean markdown
+      - Local resume.md                              → reference text
+      - score_text_overlap (in-process, no API call) → coverage percentage
+    """
+    jd_text = await _fetch_via_jina(url)
+    resume = Path(resume_path).read_text()
+    return _compute_overlap(jd_text, resume)
+```
+
+Guidelines for composition:
+
+- **Prefer free + OSS first.** Reach for paid tiers only when free options can't meet the latency / quality / volume bar.
+- **Keep API keys in env vars**, never in the tool's code or arguments. The tool reads `os.getenv(...)` lazily so the server boots even if a key is missing.
+- **Fail loud.** If an upstream service returns 4xx/5xx, raise — don't silently fall back unless the description explicitly promises a fallback.
+- **Cache idempotent reads.** If a tool fetches the same URL many times, an in-process LRU keeps cost down without changing the API.
+- **Document upstream dependencies in the docstring.** Future maintainers (and `find_tool`'s users) need to know what the tool actually depends on.
 
 ## 9. Deployment
 

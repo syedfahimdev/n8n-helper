@@ -73,13 +73,11 @@ def register_tools(mcp: FastMCP) -> None:
         APIs) should import their SDK lazily so the server boots without
         the dep installed.
     """
-    from tools import discovery, health, skills_runner, text, web
+    from tools import discovery, health, skills_runner
 
     discovery.register(mcp)
     health.register(mcp)
     skills_runner.register(mcp)
-    text.register(mcp)
-    web.register(mcp)
 
 
 def build_app() -> FastMCP:
