@@ -1,4 +1,4 @@
-"""n8n-helper — FastMCP server exposing tools and skills over HTTP streamable transport.
+"""n8n-helper — FastMCP server exposing tools over HTTP streamable transport.
 
 Run:
     python server.py
@@ -10,9 +10,7 @@ Desktop, Cursor, anything that speaks MCP) connect to:
     Header: Authorization: Bearer <N8N_HELPER_TOKEN>
 
 Adding a new tool: write a `@mcp.tool` function in `tools/` and register it
-inside `register_tools(mcp)` below. Adding a new markdown skill: drop a folder
-under `skills/<name>/` with a `SKILL.md`. The `run_skill` tool will discover and
-execute it on demand.
+inside `register_tools(mcp)` below.
 """
 from __future__ import annotations
 
@@ -73,20 +71,19 @@ def register_tools(mcp: FastMCP) -> None:
         APIs) should import their SDK lazily so the server boots without
         the dep installed.
     """
-    from tools import discovery, health, skills_runner
+    from tools import discovery, health
 
     discovery.register(mcp)
     health.register(mcp)
-    skills_runner.register(mcp)
 
 
 def build_app() -> FastMCP:
     mcp = FastMCP(
         name="n8n-helper",
         instructions=(
-            "Tools and skills exposed for n8n workflows. Use `health` to check "
-            "the server is up. Use `list_skills` to see available markdown skills. "
-            "Use `run_skill` to execute a skill by name."
+            "Tools exposed for n8n workflows. Use `find_tool` to search the "
+            "registry by free-text query when you don't know which specific "
+            "tool to call. Use `health` to check the server is up."
         ),
         auth=_build_verifier(),
     )
