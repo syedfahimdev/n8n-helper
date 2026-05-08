@@ -248,7 +248,7 @@ The same `build_app()` factory in `server.py` is reused for every deployment tar
 
 ### 9.1 Vercel (recommended for this project)
 
-The repo ships with `api/mcp.py` (ASGI entrypoint) and `vercel.json` (Fluid Compute on, 300s max duration). Vercel has [native MCP server support](https://vercel.com/docs/mcp/deploy-mcp-servers-to-vercel) — Fluid Compute keeps instances warm so MCP session state survives bursty traffic.
+The repo ships with `api/index.py` (ASGI entrypoint — uses one of Vercel's recognized Python entrypoint filenames) and `vercel.json` (Fluid Compute on). Vercel has [native MCP server support](https://vercel.com/docs/mcp/deploy-mcp-servers-to-vercel) — Fluid Compute keeps instances warm so MCP session state survives bursty traffic.
 
 Deploy:
 
@@ -263,7 +263,7 @@ vercel --prod            # first production deploy
 After the first deploy, the endpoint is:
 
 ```
-POST https://<project-name>.vercel.app/api/mcp
+POST https://<project-name>.vercel.app/mcp
 Header: Authorization: Bearer <N8N_HELPER_TOKEN>
 ```
 
